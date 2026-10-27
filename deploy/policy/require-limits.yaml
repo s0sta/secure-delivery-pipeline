@@ -1,0 +1,24 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: shop-require-limits-and-probes
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: limits-and-probes
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [shop, shop-dev]
+      validate:
+        message: "Pods must run as non-root; containers need CPU/memory limits and liveness/readiness probes."
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+            containers:
+              - resources:
+                  limits: { memory: "?*", cpu: "?*" }
+                livenessProbe: { httpGet: { path: "?*" } }
+                readinessProbe: { httpGet: { path: "?*" } }

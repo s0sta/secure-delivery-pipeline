@@ -1,0 +1,18 @@
+# Local run: docker compose up --build   →  http://127.0.0.1:8080/docs
+services:
+  shop-api:
+    build: .
+    image: shop-api:dev
+    environment:
+      APP_ENV: dev
+      ALLOWED_HOSTS: "localhost,127.0.0.1"
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10001:10001"
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }

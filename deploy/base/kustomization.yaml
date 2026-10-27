@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - serviceaccount.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  - pdb.yaml
+  - hpa.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/name: shop-api
+      app.kubernetes.io/part-of: secure-delivery-pipeline
+    includeSelectors: true
+images:
+  - name: shop-api
+    newName: ghcr.io/s0sta/secure-delivery-pipeline
+    newTag: "1.0.0"
