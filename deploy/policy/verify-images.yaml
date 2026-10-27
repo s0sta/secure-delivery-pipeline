@@ -1,0 +1,25 @@
+# Kyverno: pods in the shop namespaces may only run images signed by this repo's release workflow
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: shop-verify-signed-images
+spec:
+  validationFailureAction: Enforce
+  webhookTimeoutSeconds: 15
+  rules:
+    - name: signed-by-release-workflow
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [shop, shop-dev]
+      verifyImages:
+        - imageReferences: ["ghcr.io/s0sta/secure-delivery-pipeline*"]
+          mutateDigest: true
+          verifyDigest: true
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "https://github.com/s0sta/secure-delivery-pipeline/.github/workflows/ci.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor: { url: https://rekor.sigstore.dev }

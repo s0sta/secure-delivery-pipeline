@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: shop
+  namespace: argocd
+spec:
+  description: shop-api, limited to its own namespaces and this repository
+  sourceRepos:
+    - https://github.com/s0sta/secure-delivery-pipeline.git
+  destinations:
+    - { server: https://kubernetes.default.svc, namespace: shop }
+    - { server: https://kubernetes.default.svc, namespace: shop-dev }
+  clusterResourceWhitelist:
+    - { group: "", kind: Namespace }
+  namespaceResourceBlacklist:
+    - { group: "", kind: ResourceQuota }
+    - { group: "", kind: LimitRange }

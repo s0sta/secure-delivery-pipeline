@@ -1,0 +1,193 @@
+# Secure delivery pipeline for shop-api
+#   pull request : test → secret scan → SAST → IaC scan → build → image scan → SBOM   (nothing is pushed)
+#   main         : the same, then push → sign (keyless) → attest SBOM + provenance → deploy to dev (GitOps)
+#                  → open a pull request that promotes the same digest to prod (a human approves it)
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore: ["deploy/overlays/**", "docs/**", "**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install -r requirements-dev.txt
+      - name: Lint (ruff, incl. bandit rules)
+        run: ruff check app tests && ruff format --check app tests
+      - name: Unit tests with coverage gate (90 %)
+        run: pytest --cov=app --cov-report=xml --cov-report=term
+      - uses: actions/upload-artifact@v4
+        with: { name: coverage, path: coverage.xml, retention-days: 7 }
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sast:
+    name: SAST (semgrep)
+    runs-on: ubuntu-latest
+    permissions: { contents: read, security-events: write }
+    container: { image: semgrep/semgrep:1.95.0 }
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep scan --config p/default --config p/python --config p/dockerfile --sarif --output semgrep.sarif --error --metrics off
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with: { sarif_file: semgrep.sarif, category: semgrep }
+
+  iac:
+    name: IaC and manifest checks
+    runs-on: ubuntu-latest
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy config scan (Dockerfile, Kubernetes)
+        uses: aquasecurity/trivy-action@0.28.0
+        with: { scan-type: config, scan-ref: ., severity: "HIGH,CRITICAL", exit-code: "1", format: table }
+      - name: Render overlays and validate against the Kubernetes schema
+        run: |
+          mkdir -p "$HOME/bin" && export PATH="$HOME/bin:$PATH"
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz -C "$HOME/bin" kubeconform
+          for o in deploy/overlays/*/; do
+            echo "== $o"
+            kustomize build "$o" | kubeconform -strict -summary -kubernetes-version 1.31.0 -ignore-missing-schemas
+          done
+
+  build:
+    name: Build, scan, SBOM, sign
+    needs: [test, secrets, sast, iac]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push to GHCR (main only)
+      id-token: write        # keyless signing with the workflow identity
+      attestations: write
+      security-events: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+      - name: Build (load locally for scanning)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: shop-api:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the container
+        run: |
+          docker run -d --name smoke -p 8080:8080 --read-only --tmpfs /tmp --cap-drop ALL shop-api:scan
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8080/ready
+          docker rm -f smoke
+      - name: Image scan (fail on fixable CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with: { image-ref: "shop-api:scan", severity: CRITICAL, ignore-unfixed: true, exit-code: "1", format: table }
+      - name: Image scan report (SARIF, HIGH+)
+        uses: aquasecurity/trivy-action@0.28.0
+        with: { image-ref: "shop-api:scan", severity: "HIGH,CRITICAL", format: sarif, output: trivy-image.sarif }
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: trivy-image.sarif, category: trivy-image }
+      - name: SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with: { image: "shop-api:scan", format: cyclonedx-json, output-file: sbom.cdx.json, upload-artifact: true }
+
+      # ---- main branch only: publish, sign, attest ----
+      - if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - if: github.ref == 'refs/heads/main'
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          provenance: false
+      - if: github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@v3
+      - name: Sign the image and attach the SBOM (keyless)
+        if: github.ref == 'refs/heads/main'
+        env: { DIGEST: "${{ steps.push.outputs.digest }}" }
+        run: |
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "${IMAGE}@${DIGEST}"
+      - name: Build provenance (SLSA)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/attest-build-provenance@v1
+        with: { subject-name: "${{ env.IMAGE }}", subject-digest: "${{ steps.push.outputs.digest }}", push-to-registry: true }
+
+  deploy-dev:
+    name: Deploy to dev (GitOps commit)
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin dev to the new digest
+        env: { DIGEST: "${{ needs.build.outputs.digest }}" }
+        run: |
+          cd deploy/overlays/dev
+          kustomize edit set image "shop-api=${IMAGE}@${DIGEST}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "deploy(dev): shop-api ${DIGEST:7:12}" && git push
+        # Argo CD watches deploy/overlays/dev and syncs the cluster by itself.
+
+  promote-prod:
+    name: Open the promotion pull request for prod
+    if: github.ref == 'refs/heads/main'
+    needs: [build, deploy-dev]
+    runs-on: ubuntu-latest
+    permissions: { contents: write, pull-requests: write }
+    steps:
+      - uses: actions/checkout@v4
+      - env: { DIGEST: "${{ needs.build.outputs.digest }}" }
+        run: cd deploy/overlays/prod && kustomize edit set image "shop-api=${IMAGE}@${DIGEST}"
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: promote/prod
+          title: "Promote shop-api to prod"
+          commit-message: "deploy(prod): promote shop-api ${{ needs.build.outputs.digest }}"
+          body: |
+            Promotes the digest that passed all checks and runs in dev:
+            `${{ env.IMAGE }}@${{ needs.build.outputs.digest }}`
+            Signed with cosign (keyless) and attested (SBOM, SLSA provenance). Merge = deploy to prod by Argo CD.

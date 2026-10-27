@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: shop-api-prod
+  namespace: argocd
+spec:
+  project: shop
+  source:
+    repoURL: https://github.com/s0sta/secure-delivery-pipeline.git
+    targetRevision: main
+    path: deploy/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: shop
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=false, ServerSideApply=true]
+    retry: { limit: 3, backoff: { duration: 10s, factor: 2, maxDuration: 2m } }
