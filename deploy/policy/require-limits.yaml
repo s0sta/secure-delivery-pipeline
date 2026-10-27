@@ -12,9 +12,11 @@ spec:
               kinds: [Pod]
               namespaces: [shop, shop-dev]
       validate:
-        message: "Containers need CPU/memory limits and liveness/readiness probes."
+        message: "Pods must run as non-root; containers need CPU/memory limits and liveness/readiness probes."
         pattern:
           spec:
+            securityContext:
+              runAsNonRoot: true
             containers:
               - resources:
                   limits: { memory: "?*", cpu: "?*" }
