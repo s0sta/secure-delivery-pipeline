@@ -6,6 +6,6 @@ resources:
 - ingress.yaml
 # CI updates this tag (or digest) with: kustomize edit set image shop-api=ghcr.io/s0sta/secure-delivery-pipeline@sha256:…
 images:
-- digest: sha256:bf471203925f08031d25e6fd8f710508bac229b8d73e92839499e3e50db79726
+- digest: sha256:20d39f7714cf85a80c4ae4892c3cf7f8efec8e4b607749226235b86b052c7e23
   name: shop-api
   newName: ghcr.io/s0sta/secure-delivery-pipeline
