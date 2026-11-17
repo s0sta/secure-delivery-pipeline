@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1.10
 # ---- build stage: install dependencies into a virtual environment ----
-FROM python:3.12-slim-bookworm AS build
+FROM python:3.15-slim-bookworm AS build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
 COPY app/requirements.txt .
 RUN python -m venv /venv && /venv/bin/pip install -r requirements.txt
 
 # ---- runtime stage: small image, no compilers, no pip, non-root ----
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.15-slim-bookworm AS runtime
 LABEL org.opencontainers.image.title="shop-api" \
       org.opencontainers.image.source="https://github.com/s0sta/secure-delivery-pipeline" \
       org.opencontainers.image.licenses="MIT"
